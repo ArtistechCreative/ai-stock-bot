@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Data & Logs
+data/
+logs/
+*.log
+
+# Virtual env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config (contains API keys)
+config_local.py
+*.pem
+*.key
+
+# Model files (large)
+*.pth
+*.pt
+*.h5
+*.onnx
+
+# Cron/schedule state
+trail_state.json
