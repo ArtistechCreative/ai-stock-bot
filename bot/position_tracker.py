@@ -245,7 +245,7 @@ def check_and_close_positions() -> dict:
             trailing_activated = True
             alerts.append(
                 f"✅ *追踪止损已激活* — {ticker}\n"
-                f"  激活价: ${current_price:.2f} | 档位: {trailing_stop_points} 点"
+                f"  激活价: ${current_price:.5f} | 档位: {trailing_stop_points} 点"
             )
 
         # 止损触发判断
@@ -281,7 +281,7 @@ def check_and_close_positions() -> dict:
         }
 
         if triggered:
-            print(f"  🎯 {ticker} 触发 {triggered} | 现价=${current_price:.2f} | {'≤' if triggered == 'STOP_LOSS' or triggered == 'TRAILING_STOP' else '≥'} 目标价=${trailing_trigger_price if triggered == 'TRAILING_STOP' else (stop_loss if triggered == 'STOP_LOSS' else take_profit):.2f}")
+            print(f"  🎯 {ticker} 触发 {triggered} | 现价=${current_price:.5f} | {'≤' if triggered == 'STOP_LOSS' or triggered == 'TRAILING_STOP' else '≥'} 目标价=${trailing_trigger_price if triggered == 'TRAILING_STOP' else (stop_loss if triggered == 'STOP_LOSS' else take_profit):.5f}")
             # 用 get_all_signals_for_close 找行号
             try:
                 matches = get_all_signals_for_close(ticker)

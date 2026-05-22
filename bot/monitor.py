@@ -8,13 +8,16 @@
 import time
 import threading
 import requests
-import yfinance as yf
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional
 import json
 import os
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from bot.data_fetcher import fetch_quotes_batch
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -71,35 +74,35 @@ class StockMonitor:
     # ---- 数据获取 ----
 
     def fetch_quotes(self) -> dict:
-        """获取所有股票当前行情"""
+        """获取所有股票当前行情（自动 fallback）"""
+        # 过滤掉加密货币（CCXT 那边处理）
+        stock_tickers = [t for t in self.tickers if "/" not in t]
         quotes = {}
-        for ticker in self.tickers:
-            try:
-                stock = yf.Ticker(ticker)
-                info = stock.info
-                hist = stock.history(period="5d")
 
-                price = info.get("regularMarketPrice") or info.get("currentPrice")
-                prev_close = info.get("previousClose") or hist["Close"].iloc[-2] if len(hist) >= 2 else price
-                volume = info.get("volume", 0)
-                avg_vol = info.get("averageVolume", 1)
-
-                # 计算各种指标
-                change_pct = (price - prev_close) / prev_close * 100 if prev_close else 0
+        try:
+            fetched = fetch_quotes_batch(stock_tickers)
+            for ticker, q in fetched.items():
+                price      = q.get("price")
+                prev_close = q.get("prev_close")
+                volume     = q.get("volume", 0)
+                avg_vol    = q.get("avg_volume", 1)
+                change_pct = q.get("change_5d_pct", 0)   # fallback 源可能只有今日%
+                change_pct = (price - prev_close) / prev_close * 100 if prev_close and price else change_pct
 
                 quotes[ticker] = {
-                    "price": price,
-                    "prev_close": prev_close,
-                    "change_pct": round(change_pct, 3),
-                    "volume": volume,
-                    "avg_volume": avg_vol,
-                    "volume_ratio": round(volume / avg_vol, 2) if avg_vol else 0,
-                    "market_cap": info.get("marketCap", 0),
-                    "pe": info.get("trailingPE"),
-                    "beta": info.get("beta"),
+                    "price"        : price,
+                    "prev_close"   : prev_close,
+                    "change_pct"   : round(change_pct, 3),
+                    "volume"       : volume,
+                    "avg_volume"   : avg_vol,
+                    "volume_ratio" : round(volume / avg_vol, 2) if avg_vol else 0,
+                    "market_cap"   : q.get("market_cap", 0),
+                    "pe"           : q.get("pe"),
+                    "beta"         : q.get("beta"),
+                    "_source"      : q.get("_source"),
                 }
-            except Exception as e:
-                print(f"  [!] {ticker}: {e}")
+        except Exception as e:
+            print(f"  [!] fetch_quotes 失败: {e}")
 
         return quotes
 

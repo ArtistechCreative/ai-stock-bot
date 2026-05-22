@@ -31,6 +31,12 @@ class RiskConfig:
     short_take_profit_pct: float = 15.0     # 空头止盈（股价跌幅超此%则止盈）
     allow_short: bool = True                # 是否允许做空
 
+    # ── 加密货币专属风控（7x24 高波动）──────────────────────────
+    crypto_stop_loss_pct: float = 15.0    # 加密货币止损（更宽）
+    crypto_take_profit_pct: float = 25.0  # 加密货币止盈（更高目标）
+    crypto_trailing_stop_pct: float = 8.0 # 加密货币追踪止损（从峰值回撤 8% 触发）
+    crypto_max_position_pct: float = 10.0 # 加密货币单笔仓位上限
+
     # === 回撤限制 ===
     max_drawdown_pct: float = 15.0          # 最大回撤（触发强平）
 
@@ -191,6 +197,20 @@ class RiskManager:
         pct = risk_pct or self.config.max_single_position_pct
         max_amount = portfolio_value * (pct / 100)
         return round(max_amount / price, 2)
+
+    def get_crypto_stop_loss(self, entry_price: float, is_long: bool = True) -> float:
+        """加密货币止损价（更宽，适用于 7x24 高波动）"""
+        if is_long:
+            return round(entry_price * (1 - self.config.crypto_stop_loss_pct / 100), 4)
+        else:
+            return round(entry_price * (1 + self.config.crypto_stop_loss_pct / 100), 4)
+
+    def get_crypto_take_profit(self, entry_price: float, is_long: bool = True) -> float:
+        """加密货币止盈价（更高目标）"""
+        if is_long:
+            return round(entry_price * (1 + self.config.crypto_take_profit_pct / 100), 4)
+        else:
+            return round(entry_price * (1 - self.config.crypto_take_profit_pct / 100), 4)
 
     def get_short_quantity(
         self,

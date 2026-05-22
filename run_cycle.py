@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-WATCHLIST = ['NVDA','TSLA','AMD','MSFT','META','AAPL','AMZN','GOOGL','JPM','V','UNH','XOM','JNJ','KO','DIS','NFLX','PLTR','COIN','SOFI']
+from bot.config import WATCHLIST
 
 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] === AI股神后台学习循环 ===")
 

@@ -29,16 +29,28 @@ CRYPTO_WATCHLIST = [
     "WIF/USDT",   # MEME
 ]
 
-# 观察列表（外汇 + 加密 + 黄金，股票已不适合 $25 本金）
-WATCHLIST = [
-    # 外汇 CFD（MITRADE 200x）
-    "EURUSD=X", "GBPUSD=X", "AUDUSD=X", "USDJPY=X",
-    "EURJPY=X", "GBPJPY=X",
-    # 加密（MITRADE 100x 合约）
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "XRP/USDT",
-    # 黄金（MITRADE 100x）
-    "GC=F",
+# ===== 股票观察列表（S&P 500，MITRADE 可交易）=====
+STOCK_WATCHLIST = [
+    # Tech/AI (22)
+    "NVDA","MSFT","AMD","META","AAPL","AMZN","GOOGL","GOOG","TSLA","NFLX",
+    "AVGO","CRM","ORCL","CSCO","ADBE","ACN","IBM","INTC","QCOM","TXN","MU","LRCX",
+    # Finance (20)
+    "JPM","V","MA","BAC","WFC","GS","MS","BLK","AXP","C",
+    "SCHW","SPGI","MCO","CME","ICE","USB","PNC","TFC","COF","ADP","PLTR",
+    # Healthcare (18)
+    "LLY","UNH","JNJ","ABBV","MRK","PFE","ABT","TMO","DHR","BMY",
+    "AMGN","GILD","VRTX","REGN","ISRG","MDT","SYK","ZTS","BSX","EW",
+    # Industrial/Energy (20)
+    "CAT","DE","HON","GE","RTX","LMT","NOC","BA","UPS","FDX",
+    "XOM","CVX","COP","SLB","EOG","MPC","VLO","PSX","OXY","CTAS",
+    # Consumer/Utilities (20)
+    "PG","KO","PEP","COST","WMT","HD","MCD","SBUX","NKE","DIS",
+    "CMCSA","VZ","T","TMUS","CHTR","EA","TTWO","LEN","DRI","NEE",
+    "EXC","AEP","ORLY","AZO","ROST","BKR","PCAR","EL",
 ]
+
+# 观察列表（外汇 + 加密 + 黄金，股票已不适合 $25 本金）
+WATCHLIST = STOCK_WATCHLIST + CRYPTO_WATCHLIST[:7]  # 股票池 + 前7个主流加密货币
 
 # 筛选条件（宽松版 — 演示用）
 SCREENER_CONFIG = {

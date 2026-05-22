@@ -84,59 +84,57 @@ def _read_sheet_total_capital() -> float:
 
 
 def _signal_leverage(ticker: str, direction: str, price: float, stop_loss: float, user_risk: str = "medium") -> float:
-    """根据资产类别 + 止损空间 + 用户风险偏好计算建议杠杆。"""
-    tier_info = ASSET_LEVERAGE_TIERS.get(ticker, None)
-    if tier_info:
-        tier = tier_info["tier"]
-        max_lev = tier_info["max_leverage"]
-    else:
-        tier = 6
-        max_lev = 5.0  # 股票CFD默认5x
+    """
+    根据「每笔最多亏本金 X%」反推可用最大杠杆。
 
-    risk_factors = {"conservative": 0.5, "medium": 0.7, "aggressive": 1.0}
-    risk_factor = risk_factors.get(user_risk, 0.7)
+    核心公式：leverage = (max_loss_pct / stop_loss_pct) * 100
+    逻辑：亏 max_loss_pct 本金 能扛 stop_loss_pct 的波动 → 杠杆 = 该比例 × 100
+    例子：max_loss=10%, stop_loss=8% → (10/8)*100 = 125x（tier1封顶100x）
+          max_loss=10%, stop_loss=5% → (10/5)*100 = 200x（tier1封顶100x）
+          max_loss=5%,  stop_loss=2% → (5/2)*100  = 250x（tier1封顶100x）
+    """
+    tier_info = ASSET_LEVERAGE_TIERS.get(ticker, None)
+    tier_max = tier_info["max_leverage"] if tier_info else 5.0
+
+    # aggressive=20% 单笔最大亏损（激进模式可以一单亏20%本金）
+    max_loss_pcts = {"conservative": 5.0, "medium": 10.0, "aggressive": 20.0}
+    max_loss_pct = max_loss_pcts.get(user_risk, 10.0)
 
     if price > 0 and stop_loss > 0:
         stop_loss_pct = abs(stop_loss - price) / price * 100
     else:
         stop_loss_pct = 8.0
 
-    raw = risk_factor / (stop_loss_pct / 100)
+    # 核心：杠杆 = 能亏的 / 止损幅度 × 100
+    raw_leverage = (max_loss_pct / stop_loss_pct) * 100.0
     if direction in ("SHORT", "SELL"):
-        raw *= 0.8
+        raw_leverage *= 0.8
 
-    # tier 4 外汇 CFD：MITRADE 200x
-    if tier == 4:
-        max_lev = 200
-
-    # tier 5 黄金/原油 CFD：MITRADE 100x
-    if tier == 5:
-        max_lev = 100
-
-    suggested = min(max_lev, max(1.0, round(raw)))
-    if tier == 3:
-        suggested = min(50.0, suggested)
+    suggested = min(tier_max, max(2.0, raw_leverage))
     return float(suggested)
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 
-# ======== 数据层（yfinance + CCXT/OKX 加密货币，broker-agnostic） ========
+# ════════════════════════════════════════════════════════════════════
+# 数据层（统一用 data_fetcher 的链式 fallback）
+# yfinance + Alpha Vantage + Finnhub + Twelvedata
+# 加密货币（带 '/' 如 BTC/USDT）走 OKX + CCXT
+# ════════════════════════════════════════════════════════════════════
 
 def get_live_quotes(tickers: list[str]) -> dict:
     """
-    用 yfinance 获取股票/外汇/期货实时报价
-    加密货币（带 '/' 如 BTC/USDT）走 OKX + CCXT（不依赖 yfinance）
+    用 data_fetcher 批量获取股票/外汇/期货实时报价（自动 fallback）。
+    加密货币（带 '/' 如 BTC/USDT）走 OKX + CCXT。
     """
-    import yfinance as yf
+    from data_fetcher import fetch_quotes_batch
 
     # ── 加密货币路由：走 OKX CCXT ───────────────────────────────
-    crypto_tickers = [t for t in tickers if "/" in t]
-    stock_tickers = [t for t in tickers if "/" not in t]
+    crypto_tickers  = [t for t in tickers if "/" in t]
+    stock_tickers   = [t for t in tickers if "/" not in t]
     quotes = {}
 
-    # 加密货币通过 CCXT/OKX 获取
     if crypto_tickers:
         try:
             sys.path.insert(0, os.path.dirname(__file__))
@@ -147,38 +145,25 @@ def get_live_quotes(tickers: list[str]) -> dict:
                     q = cd.fetch_quote(sym, use_cache=False)
                     if q:
                         quotes[sym] = {
-                            "price": q.last_price,
-                            "prev_close": None,
-                            "volume": q.volume_24h,
-                            "avg_volume": q.volume_24h or 1,
-                            "market_cap": 0,
-                            "pe": None,
-                            "beta": 1.0,
-                            "change_24h_pct": q.change_24h_pct,
+                            "price"          : q.last_price,
+                            "prev_close"     : None,
+                            "volume"         : q.volume_24h,
+                            "avg_volume"     : q.volume_24h or 1,
+                            "market_cap"     : 0,
+                            "pe"             : None,
+                            "beta"           : 1.0,
+                            "change_24h_pct" : q.change_24h_pct,
                         }
                 except Exception as e:
                     print(f"  [!] {sym} CCXT 获取失败: {e}")
         except ImportError as e:
             print(f"  [!] crypto_data 模块导入失败: {e}")
 
-    # 股票/外汇/期货走 yfinance
-    for ticker in stock_tickers:
-        try:
-            t = yf.Ticker(ticker)
-            info = t.info
-            price = info.get("regularMarketPrice") or info.get("currentPrice")
-            prev_close = info.get("previousClose")
-            quotes[ticker] = {
-                "price": price,
-                "prev_close": prev_close,
-                "volume": info.get("volume", 0),
-                "avg_volume": info.get("averageVolume", 1),
-                "market_cap": info.get("marketCap", 0),
-                "pe": info.get("trailingPE"),
-                "beta": info.get("beta", 1.0),
-            }
-        except Exception as e:
-            print(f"  [!] {ticker} yfinance 获取失败: {e}")
+    # ── 股票/外汇/期货：走 data_fetcher（自动 fallback）──────────
+    if stock_tickers:
+        fetched = fetch_quotes_batch(stock_tickers)
+        quotes.update(fetched)
+
     return quotes
 
 
@@ -203,129 +188,131 @@ def generate_signals(
 ) -> list[dict]:
     """
     综合 AI 评分 + DL 预测生成交易信号（支持多空）
-    返回: [{ticker, action, qty, price, reason, stop_loss, take_profit}]
+    新架构（2026-05-18）：调用 strategy_optimizer.get_signal()，
+    以评分排名为基准 + DL 高信心时加分奖励。板块路由（batch_predict_sector）
+    自动识别 crypto/tech/defensive 板块并加载对应模型。
+
+    ranked_stocks: rank_stocks() 返回的列表（含 score/rsi/macd_hist 等字段）
+    dl_predictions: batch_predict_sector() 返回的列表（含 signal/confidence）
+    返回: [{ticker, action, qty, price, reason, stop_loss, take_profit, ...}]
     """
+    from bot.strategy_optimizer import StrategyOptimizer
+
     signals = []
 
-    for stock in ranked_stocks[:8]:
-        ticker = stock["ticker"]
-        price = stock["price"]
+    # ── Step 1: 调用 get_signal() 获取综合排名 ───────────────
+    try:
+        opt = StrategyOptimizer()
+        combined = opt.get_signal(dl_predictions, ranked_stocks)
+    except Exception as e:
+        print(f"  [!] get_signal() 调用失败: {e}，回退到纯评分逻辑")
+        combined = None
+
+    # ── Step 2: 解包 combined，按评分+DL综合分选股 ──────────
+    # combined 按 combined_score 降序排列
+    if combined is not None:
+        top_candidates = combined  # 已经是排序后的
+    else:
+        # 回退：只用评分排名
+        top_candidates = [
+            {"ticker": s["ticker"], "score_signal": 1 - i / max(len(ranked_stocks), 1), "dl_bonus": 0, "dl_confidence": 0}
+            for i, s in enumerate(ranked_stocks)
+        ]
+
+    # ── Step 3: 生成 BUY 信号（综合分 > 0.6 且 DL信心足够 OR 综合分极高）──
+    for c in top_candidates:
+        ticker = c["ticker"]
+        combined_score = c.get("combined_score", 0)
+        dl_conf = abs(c.get("dl_confidence", 0))
+        dl_bonus = c.get("dl_bonus", 0)
+
+        # 找到对应的评分数据和 DL 预测
+        stock = next((s for s in ranked_stocks if s["ticker"] == ticker), None)
+        dl_pred = next((d for d in dl_predictions if d["ticker"] == ticker), None)
+
+        if not stock:
+            continue
+
+        price = stock.get("price")
         if not price or price <= 0:
             continue
 
-        # 找 DL 预测
-        dl_pred = next((d for d in dl_predictions if d["ticker"] == ticker), None)
-        dl_signal = dl_pred.get("signal", "HOLD") if dl_pred else "HOLD"
-        dl_confidence = dl_pred.get("confidence", 0) if dl_pred else 0
-
-        # 综合评分
-        score = stock.get("score", 0)
         is_crypto = stock.get("_is_crypto", False)
 
-        # ====== 多头信号（通用 + 加密货币特殊条件）======
-        buy_conditions = [
-            score >= 50,               # 评分基础分
-            dl_confidence >= 65,        # DL 信心度
-            stock["change_5d_pct"] > 0, # 5日趋势向上
-            stock["volume_ratio"] >= 1.0,  # 成交量放大
-        ]
-
-        # ── 加密货币特殊规则：RSI 超卖 或 MACD 金叉 + 趋势正 → 直接买入（无需 DL）──
+        # ── 加密货币特殊规则（技术指标驱动，无需 DL）───────
         if is_crypto:
             rsi = stock.get("rsi")
             macd_hist = stock.get("macd_hist")
             mom5 = stock.get("change_5d_pct", 0)
             bb_pct = stock.get("bb_pct")
-            # 条件1：RSI < 40 超卖反弹
-            crypto_buy_rsi = rsi is not None and rsi < 40
-            # 条件2：MACD 从负转正（金叉）+ 5日正动量
-            crypto_buy_macd = macd_hist is not None and macd_hist > 0 and mom5 > 0
-            # 条件3：触碰布林下轨 + 反弹迹象
-            crypto_buy_bb = bb_pct is not None and bb_pct < 0.25 and mom5 > 0
 
-            if crypto_buy_rsi or crypto_buy_macd or crypto_buy_bb:
-                max_shares = int((portfolio_cash * max_position_pct / 100) / price)
+            crypto_buy = (rsi is not None and rsi < 40) or (macd_hist is not None and macd_hist > 0 and mom5 > 0)
+            crypto_short = rsi is not None and rsi > 70
+
+            if crypto_buy:
+                max_shares = (portfolio_cash * max_position_pct / 100) / price
                 sl = round(price * (1 - risk_config.stop_loss_default_pct / 100), 2)
                 tp1 = round(price * (1 + risk_config.profit_taking_pct / 100), 2)
-                sig_reason = "加密技术信号"
-                if crypto_buy_rsi:
-                    sig_reason += f"(RSI={rsi:.1f}超卖)"
-                elif crypto_buy_macd:
-                    sig_reason += f"(MACD金叉)"
-                else:
-                    sig_reason += f"(布林下轨反弹)"
+                reason = f"AI评分{stock.get('score', 0)} + 加密技术信号(RSI={rsi:.1f}超卖)" if rsi and rsi < 40 else f"AI评分{stock.get('score', 0)} + MACD金叉"
                 signals.append({
-                    "ticker": ticker,
-                    "action": "BUY",
-                    "qty": max_shares,
-                    "price": price,
-                    "reason": f"AI评分{score} {sig_reason}",
-                    "score": score,
-                    "stop_loss": sl,
-                    "take_profit_1": tp1,
+                    "ticker": ticker, "action": "BUY",
+                    "qty": max_shares, "price": price,
+                    "reason": reason,
+                    "score": stock.get("score", 0),
+                    "stop_loss": sl, "take_profit_1": tp1,
                     "trailing_stop_points": 50,
-                    "position_type": "LONG",
-                    "strategy": "AI_SCORING",
+                    "position_type": "LONG", "strategy": "AI_SCORING",
                     "leverage": _signal_leverage(ticker, "BUY", price, sl),
                 })
-                continue  # 已生成信号，跳过通用条件检查
-
-        if sum(buy_conditions) >= 3:
-            max_shares = int((portfolio_cash * max_position_pct / 100) / price)
-            sl = round(price * (1 - risk_config.stop_loss_default_pct / 100), 2)
-            tp1 = round(price * (1 + risk_config.profit_taking_pct / 100), 2)
-            signals.append({
-                "ticker": ticker,
-                "action": "BUY",
-                "qty": max_shares,
-                "price": price,
-                "reason": f"AI评分{score} + DL信号({dl_signal} {dl_confidence}%)",
-                "score": score,
-                "stop_loss": sl,
-                "take_profit_1": tp1,
-                "trailing_stop_points": 50,
-                "position_type": "LONG",
-                "strategy": "AI_SCORING",
-                "leverage": _signal_leverage(ticker, "BUY", price, sl),
-            })
-        elif dl_signal == "BUY" and dl_confidence >= 70:
-            # DL 单独信号（半仓）
-            max_shares = int((portfolio_cash * max_position_pct / 100 / 2) / price)
-            sl = round(price * 0.95, 2)
-            signals.append({
-                "ticker": ticker,
-                "action": "BUY",
-                "qty": max_shares,
-                "price": price,
-                "reason": f"DL单独信号({dl_signal} {dl_confidence}%)",
-                "score": score,
-                "stop_loss": sl,
-                "take_profit_1": round(price * 1.12, 2),
-                "trailing_stop_points": 50,
-                "position_type": "LONG",
-                "strategy": "DL_SIGNAL",
-                "leverage": _signal_leverage(ticker, "BUY", price, sl),
-            })
-
-        # ====== 空头信号（DL SELL 且 Beta 高/评分低） ======
-        if dl_signal == "SELL" and dl_confidence >= 65:
-            if score < 40 and stock.get("beta", 1) > 1.2:
-                max_shares = int((portfolio_cash * risk_config.short_max_position_pct / 100) / price)
-                sl = round(price * (1 + risk_config.short_stop_loss_pct / 100), 2)
+            elif crypto_short:
+                max_shares = (portfolio_cash * max_position_pct / 100) / price
+                sl = round(price * (1 + risk_config.stop_loss_default_pct / 100), 2)
+                tp1 = round(price * (1 - risk_config.profit_taking_pct / 100), 2)
                 signals.append({
-                    "ticker": ticker,
-                    "action": "SHORT",
-                    "qty": max_shares,
-                    "price": price,
-                    "reason": f"DL看空({dl_signal} {dl_confidence}%) + 高β({stock['beta']}) + 低评分({score})",
-                    "score": score,
-                    "stop_loss": sl,
-                    "take_profit_1": round(price * (1 - risk_config.short_take_profit_pct / 100), 2),
+                    "ticker": ticker, "action": "SHORT",
+                    "qty": max_shares, "price": price,
+                    "reason": f"AI评分{stock.get('score', 0)} + RSI={rsi:.1f}超买做空",
+                    "score": stock.get("score", 0),
+                    "stop_loss": sl, "take_profit_1": tp1,
                     "trailing_stop_points": 50,
-                    "position_type": "SHORT",
-                    "strategy": "DL_SIGNAL",
+                    "position_type": "SHORT", "strategy": "CRYPTO_TECH_SHORT",
                     "leverage": _signal_leverage(ticker, "SHORT", price, sl),
                 })
+            continue
+
+        # ── 股票/ETF: 综合分阈值判断 ─────────────────────────
+        # 条件：combined_score > 0.6 且 (dl_conf >= 70% 或 combined_score > 0.8)
+        if combined_score > 0.6 and (dl_conf >= 70 or combined_score > 0.8):
+            max_shares = (portfolio_cash * max_position_pct / 100) / price
+            sl = round(price * (1 - risk_config.stop_loss_default_pct / 100), 2)
+            tp1 = round(price * (1 + risk_config.profit_taking_pct / 100), 2)
+            dl_info = f"DL+{dl_bonus:.3f}({dl_conf:.0f}%)" if dl_conf > 0 else "无DL"
+            signals.append({
+                "ticker": ticker, "action": "BUY",
+                "qty": round(max_shares, 4), "price": price,
+                "reason": f"综合分{combined_score:.3f} = 评分{c.get('score_signal', 0):.3f} + {dl_info}",
+                "score": stock.get("score", 0),
+                "stop_loss": sl, "take_profit_1": tp1,
+                "trailing_stop_points": 50,
+                "position_type": "LONG", "strategy": "AI_SCORING",
+                "leverage": _signal_leverage(ticker, "BUY", price, sl),
+            })
+
+        # ── 股票做空信号：DL SELL + 高信心且综合分为负 ──────
+        elif dl_pred and dl_pred.get("signal") == "SELL" and dl_conf >= 70 and combined_score < 0.3:
+            max_shares = (portfolio_cash * risk_config.short_max_position_pct / 100) / price
+            sl = round(price * (1 + risk_config.short_stop_loss_pct / 100), 2)
+            tp1 = round(price * (1 - risk_config.short_take_profit_pct / 100), 2)
+            signals.append({
+                "ticker": ticker, "action": "SHORT",
+                "qty": round(max_shares, 4), "price": price,
+                "reason": f"综合分{combined_score:.3f} + DL SELL {dl_conf:.0f}%",
+                "score": stock.get("score", 0),
+                "stop_loss": sl, "take_profit_1": tp1,
+                "trailing_stop_points": 50,
+                "position_type": "SHORT", "strategy": "DL_SIGNAL",
+                "leverage": _signal_leverage(ticker, "SHORT", price, sl),
+            })
 
     return signals
 
@@ -482,7 +469,7 @@ def monitor_and_alert(
                     "price": current_price,
                     "pnl_pct": round(pnl_pct, 2),
                     "shares": shares,
-                    "message": f"🛑 止损提醒：{ticker} 现价${current_price:.2f} ≤ 止损价${stop_price:.2f}（亏损{pnl_pct:.1f}%）请手动卖出！",
+                    "message": f"🛑 止损提醒：{ticker} 现价${current_price:.5f} ≤ 止损价${stop_price:.5f}（亏损{pnl_pct:.1f}%）请手动卖出！",
                 })
             # 止盈
             elif target_price > 0 and current_price >= target_price:
@@ -493,7 +480,7 @@ def monitor_and_alert(
                     "price": current_price,
                     "pnl_pct": round(pnl_pct, 2),
                     "shares": shares,
-                    "message": f"🎯 止盈提醒：{ticker} 现价${current_price:.2f} ≥ 目标价${target_price:.2f}（盈利{pnl_pct:.1f}%）请手动卖出！",
+                    "message": f"🎯 止盈提醒：{ticker} 现价${current_price:.5f} ≥ 目标价${target_price:.5f}（盈利{pnl_pct:.1f}%）请手动卖出！",
                 })
         elif pos_type == "SHORT":
             # 空头：盈利 = 开仓价 - 当前价
@@ -507,7 +494,7 @@ def monitor_and_alert(
                     "price": current_price,
                     "pnl_pct": round(pnl_pct, 2),
                     "shares": shares,
-                    "message": f"🛑 做空止损提醒：{ticker} 现价${current_price:.2f} ≥ 止损价${stop_price:.2f}（{'盈利' if pnl_pct > 0 else '亏损'}{abs(pnl_pct):.1f}%）请手动买回平仓！",
+                    "message": f"🛑 做空止损提醒：{ticker} 现价${current_price:.5f} ≥ 止损价${stop_price:.5f}（{'盈利' if pnl_pct > 0 else '亏损'}{abs(pnl_pct):.1f}%）请手动买回平仓！",
                 })
             # 空头止盈（股价下跌超过 target%）
             elif target_price > 0 and current_price <= target_price:
@@ -518,7 +505,7 @@ def monitor_and_alert(
                     "price": current_price,
                     "pnl_pct": round(pnl_pct, 2),
                     "shares": shares,
-                    "message": f"🎯 做空止盈提醒：{ticker} 现价${current_price:.2f} ≤ 目标价${target_price:.2f}（盈利{pnl_pct:.1f}%）请手动买回平仓！",
+                    "message": f"🎯 做空止盈提醒：{ticker} 现价${current_price:.5f} ≤ 目标价${target_price:.5f}（盈利{pnl_pct:.1f}%）请手动买回平仓！",
                 })
 
     # 发送告警
@@ -552,7 +539,7 @@ def daily_trading_cycle(
     6. 返回报告
     """
     from scorer import rank_stocks
-    from dl_strategy import batch_predict
+    from dl_strategy import batch_predict_sector
     from ai_analyzer import generate_report
 
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] ===== 每日选股交易循环 =====")
@@ -565,16 +552,24 @@ def daily_trading_cycle(
         print("  [!] 无法获取行情数据")
         return {"error": "No quote data"}
 
-    # 2. 评分排序
-    print("  📊 AI 评分排序...")
-    ranked = rank_stocks(tickers, top_n=10)
+    # 2. 评分排序（股票 + 加密货币混合排名）
+    print("  📊 AI 评分排序（全资产池）...")
+    ranked = rank_stocks(tickers, top_n=20)  # 20=给加密资产足够空间
 
-    # 3. DL 预测（可选）
+    # 3. DL 预测（板块路由版，可识别 crypto 板块模型）
+    # 先在评分股票基础上混入加密货币（从 config 读取 CRYPTO_WATCHLIST）
+    all_tickers_for_dl = list(ranked_stocks)  # 保留评分结果顺序
+    crypto_tickers = [t for t in tickers if "/" in t]
+    for t in crypto_tickers:
+        if t not in [s["ticker"] for s in all_tickers_for_dl]:
+            all_tickers_for_dl.append({"ticker": t})
+
     dl_predictions = []
     if use_dl:
-        print("  🧠 DL 预测...")
+        print("  🧠 DL 预测（板块路由）...")
         try:
-            dl_predictions = batch_predict([s["ticker"] for s in ranked[:5]], model_type=model_type)
+            ticker_list = [s["ticker"] for s in all_tickers_for_dl[:15]]
+            dl_predictions = batch_predict_sector(ticker_list)
         except Exception as e:
             print(f"  [!] DL 预测失败: {e}")
 

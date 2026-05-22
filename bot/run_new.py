@@ -51,14 +51,18 @@ def build_report():
             lines.append(
                 f"{i}. *{sig['ticker']}* ({sig.get('name', '')})"
             )
+            # 加密货币显示更多小数位（5位），股票/外汇保持2位
+            is_crypto = "/" in sig.get("ticker", "")
+            price_fmt = ".5f" if is_crypto else ".2f"
+
             lines.append(
-                f"   💰 买入价: ${sig['buy_price']:.2f}"
+                f"   💰 买入价: ${sig['buy_price']:{price_fmt}}"
             )
             lines.append(
-                f"   🛑 止损价: ${sig['stop_loss']:.2f} ({sig.get('adjusted_stop_loss_pct', 8.0):.1f}% 止损)"
+                f"   🛑 止损价: ${sig['stop_loss']:{price_fmt}} ({sig.get('adjusted_stop_loss_pct', 8.0):.1f}% 止损)"
             )
             lines.append(
-                f"   🎯 止盈1: ${sig['take_profit_1']:.2f}"
+                f"   🎯 止盈1: ${sig['take_profit_1']:{price_fmt}}"
             )
             if sig.get('trailing_stop_points') is not None:
                 lines.append(

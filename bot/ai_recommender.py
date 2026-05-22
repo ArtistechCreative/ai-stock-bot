@@ -302,12 +302,16 @@ def format_signal(rec: dict) -> str:
     src_emoji = "🤖" if rec.get("source") == "AI" else "⚙️"
     action_emoji = {"BUY": "🟢", "WATCH": "🟡"}.get(action, "⚪")
 
+    # 加密货币显示更多小数位（5位），股票/外汇保持2位
+    is_crypto = "/" in ticker
+    price_fmt = ".5f" if is_crypto else ".2f"
+
     lines = [
         f"{src_emoji}{action_emoji} **{ticker}** ({rec.get('name', '')}) — {action}",
         f"━━━━━━━━━━━━━━━━━━",
-        f"📍 买入价：${rec['price']:.2f}",
-        f"🛑 止损价：${rec['stop_loss']:.2f}",
-        f"🎯 第一止盈：${rec['take_profit_1']:.2f}",
+        f"📍 买入价：${rec['price']:{price_fmt}}",
+        f"🛑 止损价：${rec['stop_loss']:{price_fmt}}",
+        f"🎯 第一止盈：${rec['take_profit_1']:{price_fmt}}",
     ]
 
     if rec.get("trailing_stop_points") is not None:

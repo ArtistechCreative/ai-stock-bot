@@ -20,10 +20,33 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 
-from crypto_data import CryptoData, Quote, DEFAULT_WATCHLIST, PERP_INFO, DEFAULT_EXCHANGE
+from crypto_data import CryptoData, Quote, DEFAULT_WATCHLIST, PERP_INFO, DEFAULT_EXCHANGE, MultiExchangeRouter
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
+
+# 预设可连通的交易所列表（WSL 实测 OKX 可用，Binance/Bybit 被墙）
+# 用途：MultiExchangeRouter 默认交易所池（会动态跳过不可用的）
+_PREFERRABLE_EXCHANGES = ["okx", "gateio", "bitget", "kucoin"]
+
+
+def get_default_exchanges() -> list[str]:
+    """自动检测并返回可连通的交易所列表（按速度排序）"""
+    import ccxt
+    exchanges_to_test = ["okx", "gateio", "bitget", "kucoin", "bybit", "binance"]
+    available = []
+    for ex_id in exchanges_to_test:
+        try:
+            cls = getattr(ccxt, ex_id)
+            ex = cls({"enableRateLimit": True})
+            # 只测 fetch_ticker（最轻量）
+            ex.fetch_ticker("BTC/USDT", timeout=5)
+            available.append(ex_id)
+        except Exception:
+            pass
+        if len(available) >= 2:  # 找到 2 个就不继续测了
+            break
+    return available or ["okx"]  # 保底至少有一个
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -84,21 +107,25 @@ def score_crypto(
     exchange: str = DEFAULT_EXCHANGE,
     timeframe: str = "1h",
     use_cache: bool = True,
+    router: MultiExchangeRouter = None,
 ) -> dict | None:
     """
     综合评分加密货币
+    router: MultiExchangeRouter 实例，传入后自动多交易所拉取（推荐）
     返回: {
         symbol, price, score,
         change_5d_pct, mom1, rsi, macd_hist, bb_pct, atr_pct, vol_ratio, funding_rate,
         trend_score, momentum_score, signals (list of strings)
     }
     """
-    cd = CryptoData(exchange=exchange)
-    quote = cd.fetch_quote(symbol, use_cache=use_cache)
+    if router is None:
+        router = MultiExchangeRouter([exchange])
+
+    quote, err = router.fetch_quote(symbol)
     if not quote:
         return None
 
-    df = cd.fetch_ohlcv_dataframe(symbol, timeframe=timeframe, limit=200)
+    df = router.fetch_ohlcv(symbol, timeframe=timeframe, limit=200)
     if df.empty or len(df) < 30:
         return None
 
@@ -254,15 +281,33 @@ def rank_cryptos(
     exchange: str = DEFAULT_EXCHANGE,
     timeframe: str = "1h",
     top_n: int = 8,
+    multi_exchange: bool = True,
 ) -> list[dict]:
-    """评分 + 排序"""
+    """
+    评分 + 排序
+    multi_exchange=True（默认）：自动创建 MultiExchangeRouter，多交易所同时拉取
+    multi_exchange=False：退化为单交易所（使用 exchange 参数指定的）
+    """
     syms = symbols or DEFAULT_WATCHLIST
-    cd = CryptoData(exchange=exchange)
-    quotes = cd.fetch_quotes(syms)  # 强制刷新（默认不用缓存）
+
+    if multi_exchange:
+        exchanges = get_default_exchanges()
+        router = MultiExchangeRouter(
+            exchanges,
+            mode="round_robin",
+            requests_per_second=0.8,
+        )
+    else:
+        router = MultiExchangeRouter([exchange])
+
+    # 批量拉取所有币种行情（多交易所分散）
+    all_quotes = router.fetch_quotes(syms)
+    if not all_quotes:
+        return []
 
     results = []
     for sym in syms:
-        s = score_crypto(sym, exchange=exchange, timeframe=timeframe, use_cache=False)
+        s = score_crypto(sym, exchange=exchange, timeframe=timeframe, use_cache=False, router=router)
         if s:
             results.append(s)
 
