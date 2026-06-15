@@ -62,6 +62,38 @@ def log(msg):
 
 
 # ════════════════════════════════════════════════════════════════════
+# Step 0: 市场状态识别（Regime Detection）
+# ════════════════════════════════════════════════════════════════════
+REGIME_STATE = None  # 全局市场状态
+
+def step0_regime():
+    """分析当前市场状态"""
+    global REGIME_STATE
+    log("━━━ Step 0: 市场状态识别 ━━━")
+    try:
+        from bot.regime_agent import RegimeAgent, get_regime_adjustments
+        
+        agent = RegimeAgent()
+        state = agent.analyze(force_refresh=True)
+        REGIME_STATE = state
+        
+        d = state.to_dict()
+        log(f"  📊 市场状态: {d['regime']} (L{d['degradation_level']}) | "
+            f"ADX={d['adx']} | VIX={d['vix']} | 波动率={d['volatility']}% | "
+            f"20日={d['spx_return_20d']}% | 回撤={d['spx_drawdown']}%")
+        log(f"  📝 {d['description']}")
+        
+        # 如果进入安全模式，提前预警
+        if d['degradation_level'] >= 3:
+            log(f"  🛑 安全模式激活: 停止所有新开仓")
+        
+        return state
+    except Exception as e:
+        log(f"  [!] Step0 市场状态识别失败: {e}")
+        return None
+
+
+# ════════════════════════════════════════════════════════════════════
 # Step 1: 全市场评分（rank_stocks as_of_date 防泄漏）
 # ════════════════════════════════════════════════════════════════════
 def step1_score():
@@ -448,12 +480,25 @@ if __name__ == "__main__":
     log(f"  模式: {'DRY-RUN（不真实推送）' if DRY_RUN else 'LIVE'}")
     log(f"══════════════════════════════════════════════")
 
+    regime_state = step0_regime()
     ranked = step1_score()
     dl_preds = step2_dl_predict()
     signals  = step3_signals(ranked, dl_preds)
     # ── Risk Agent 审核（过滤信号） ────────────────────────────
     approved_signals, rejected_signals = step3b_risk_review(signals, ranked, dl_preds)
     log(f"  审核后可用信号: {len(approved_signals)}/{len(signals)}")
+    
+    # ── 根据 Regime 状态调整信号 ─────────────────────────────
+    if REGIME_STATE and REGIME_STATE.degradation_level >= 3:
+        log(f"  🛑 安全模式(L3): 所有开仓信号被阻止")
+        approved_signals = []
+    elif REGIME_STATE and REGIME_STATE.degradation_level == 2:
+        # 防御模式: 只保留最高分的信号
+        threshold = 70
+        before = len(approved_signals)
+        approved_signals = [s for s in approved_signals if s.get("combined_score", 0) > threshold/100]
+        log(f"  🟠 防御模式(L2): 分数>70筛选, {before}→{len(approved_signals)}")
+    
     sheets_ok = step4_sheets(approved_signals, ranked, dl_preds)
     backtest_score = step6_backtest()
     step5_telegram(approved_signals, ranked, dl_preds, backtest_score)
@@ -461,6 +506,9 @@ if __name__ == "__main__":
     log(f"")
     log(f"══════════════════════════════════════════════")
     log(f"[{datetime.now().strftime('%H:%M:%S')}] === Cron Dry-run 完成 ===")
-    log(f"  信号: {len(signals)} 条 | Sheets: {'✅' if sheets_ok else '⚠️'} | 回测分: {backtest_score:.2f}")
+    log(f"  信号: {len(approved_signals)}/{len(signals)} 通过 | "
+         f"Sheets: {'✅' if sheets_ok else '⚠️'} | 回测分: {backtest_score:.2f}")
+    if REGIME_STATE:
+        log(f"  市场: {REGIME_STATE.regime} L{REGIME_STATE.degradation_level}")
     log(f"══════════════════════════════════════════════")
     log(f"")
