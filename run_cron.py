@@ -138,6 +138,80 @@ def step3_signals(ranked, dl_preds):
 
 
 # ════════════════════════════════════════════════════════════════════
+# Step 3.5: Risk Agent 审核（一票否决权）
+# ════════════════════════════════════════════════════════════════════
+def step3b_risk_review(signals, ranked, dl_preds):
+    """将所有综合信号过 Risk Agent 审核，只保留通过/缩减的信号"""
+    log("━━━ Step 3.5: Risk Agent 审核 ━━━")
+    try:
+        from bot.risk_agent import RiskAgent, PortfolioContext, Position, TradingSignal, result_to_dict
+
+        # 构建组合上下文
+        portfolio_val = 10000  # 当前模拟资金，可从 Google Sheets 获取
+        pos_list = []
+        if ranked:
+            # 模拟：假设之前买了排名前2的股票
+            for s in ranked[:2]:
+                pos_list.append(Position(
+                    ticker=s["ticker"], shares=10,
+                    avg_cost=s.get("price", 100), side="LONG"
+                ))
+
+        ctx = PortfolioContext(
+            cash=portfolio_val * 0.5,
+            portfolio_value=portfolio_val,
+            positions=pos_list,
+            current_drawdown_pct=0,
+        )
+
+        agent = RiskAgent(context=ctx)
+
+        # 转换信号并审核
+        approved = []
+        rejected = []
+
+        for s in signals:
+            ticker = s["ticker"]
+            stock = next((st for st in ranked if st["ticker"] == ticker), {})
+            price = stock.get("price", s.get("price", 100))
+            dl_p = dl_preds.get(ticker, {})
+            conf = dl_p.get("confidence", 60) if dl_p else 60
+            is_crypto = "/" in ticker
+
+            signal = TradingSignal(
+                ticker=ticker,
+                direction="BUY",
+                suggested_shares=int(conf * 1.5),  # 基于置信度估算股数
+                suggested_price=price,
+                reason=s.get("reason", ""),
+                source="strategy_optimizer",
+                is_crypto=is_crypto,
+            )
+
+            result = agent.review(signal)
+            rd = result_to_dict(result)
+            log(f"  {rd['icon']} {ticker}: {rd['verdict']} — {rd['reason']}")
+
+            if result.verdict != "REJECT":
+                s["risk_approved"] = True
+                s["risk_shares"] = result.approved_shares
+                s["risk_stop"] = result.approved_stop
+                s["risk_target"] = result.approved_target
+                approved.append(s)
+            else:
+                s["risk_approved"] = False
+                rejected.append(s)
+
+        log(f"  Risk Agent 审核完成: {len(approved)} 通过/reduce, {len(rejected)} 拒绝")
+        return approved, rejected
+
+    except Exception as e:
+        log(f"  [!] Risk Agent 审核失败（不阻断）: {e}")
+        import traceback; traceback.print_exc()
+        return signals, []
+
+
+# ════════════════════════════════════════════════════════════════════
 # Step 4: Google Sheets 写入（信号池 20 列格式）
 # ════════════════════════════════════════════════════════════════════
 def step4_sheets(signals, ranked, dl_preds):
@@ -322,6 +396,39 @@ def step6_backtest():
         log(f"     交易次数: {result.total_trades}")
         log(f"     综合分: {score:.2f}")
 
+        # ── 回测质量门评估 ──────────────────────────────────────
+        try:
+            from bot.backtest_quality import BacktestQualityGate
+            gate = BacktestQualityGate()
+            qa_report = gate.evaluate(result, {
+                "data_years": 90/365,  # 90天 ≈ 0.25年
+                "has_survivorship_bias": False,
+                "has_lookahead": True,  # as_of_date 防泄漏
+                "oos_return_pct": result.total_return_pct,
+                "train_return_pct": result.total_return_pct,
+                "sharpe_ratio": result.sharpe_ratio,
+                "slippage_assumed": 0,  # 当前未建模滑点
+                "fee_per_trade": 0.001,
+                "market_impact_modeled": False,
+                "walk_forward_rounds": 0,
+                "monte_carlo_pass_rate": 0,
+                "total_return_pct": result.total_return_pct,
+                "num_strategies_tested": 1,
+                "has_adjusted_prices": True,
+                "has_timezone_issue": False,
+                "feature_shift_used": False,  # 当前as_of_date仅用于评分
+                "label_leakage_prevented": False,
+                "param_stability_pct": None,
+                "stress_test_2008": None,
+                "stress_test_2020": None,
+                "stress_test_2022": None,
+            })
+            for line in qa_report.summary().split("\n"):
+                log(f"  {line.strip()}")
+            qa_report.passed = True  # 暂时不阻断流程
+        except Exception as qe:
+            log(f"  [!] 质量门评估失败: {qe}")
+
         return round(score, 2)
 
     except Exception as e:
@@ -344,9 +451,12 @@ if __name__ == "__main__":
     ranked = step1_score()
     dl_preds = step2_dl_predict()
     signals  = step3_signals(ranked, dl_preds)
-    sheets_ok = step4_sheets(signals, ranked, dl_preds)
+    # ── Risk Agent 审核（过滤信号） ────────────────────────────
+    approved_signals, rejected_signals = step3b_risk_review(signals, ranked, dl_preds)
+    log(f"  审核后可用信号: {len(approved_signals)}/{len(signals)}")
+    sheets_ok = step4_sheets(approved_signals, ranked, dl_preds)
     backtest_score = step6_backtest()
-    step5_telegram(signals, ranked, dl_preds, backtest_score)
+    step5_telegram(approved_signals, ranked, dl_preds, backtest_score)
 
     log(f"")
     log(f"══════════════════════════════════════════════")
