@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import sys, os, time
+import sys, os, time, json
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "bot"))
 
@@ -45,6 +45,12 @@ from backtest import BacktestEngine
 from dl_strategy import DLStrategy, batch_predict
 from strategy_optimizer import StrategyOptimizer, StrategyParams
 from auto_trade import daily_trading_cycle, monitor_and_alert
+
+# ---- 新增模块（书中框架） ----
+from backtest_quality import BacktestQualityGate, QualityConfig
+from risk_agent import RiskAgent, PortfolioContext, Position, TradingSignal, result_to_dict
+from regime_agent import RegimeAgent, get_regime_adjustments
+from health_check import HealthChecker
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 PORTFOLIO_PATH = os.path.join(DATA_DIR, "portfolio.json")
@@ -123,24 +129,46 @@ else:
 st.title("📈 AI 股神 · 量化系统")
 
 # 状态栏
-status_col1, status_col2, status_col3, status_col4 = st.columns(4)
+status_col1, status_col2, status_col3, status_col4, status_col5 = st.columns(5)
 with status_col1:
-    st.success("🟢 系统就绪")
+    try:
+        ra = RegimeAgent()
+        rs = ra.analyze()
+        regime_icon = {"TRENDING":"📈","MEAN_REVERTING":"📊","CRISIS":"🚨","UNCERTAIN":"❓"}
+        st.success(f"{regime_icon.get(rs.regime,'❓')} {rs.regime} L{rs.degradation_level}")
+    except:
+        st.success("🟢 系统就绪")
 with status_col2:
     st.info(f"股票池: {len(WATCHLIST)} 支")
 with status_col3:
     st.caption(f"初始资金: ${initial_cash:,}")
 with status_col4:
     st.caption(datetime.now().strftime("更新: %H:%M:%S"))
+with status_col5:
+    try:
+        hc_path = os.path.join(DATA_DIR, "health_history.json")
+        if os.path.exists(hc_path):
+            with open(hc_path) as f:
+                hist = json.load(f)
+            if hist:
+                last = hist[-1]
+                h_icon = "✅" if last["fail"] == 0 else ("⚠️" if last["warn"] < 3 else "❌")
+                st.caption(f"{h_icon} 健康: {last['passed']}/12")
+        else:
+            st.caption("📋 健康: 未检查")
+    except:
+        st.caption("📋 健康: —")
 
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 组合概览",
     "🤖 AI 策略",
     "📉 回测报告",
     "🧠 深度学习",
     "📋 信号池",
+    "🛡️ 风控面板",
+    "📊 市场状态",
 ])
 
 # ====== TAB 1: 组合概览 ======
@@ -547,6 +575,134 @@ with tab5:
                         f"| {c['strategy']} | 平仓:{c['close_date']}"
                     )
                 st.caption(f"共 {len(closed)} 条记录 | 数据来源: Google Sheet 信号池 O~S列")
+
+# ====== TAB 6: 风控面板 ======
+with tab6:
+    st.subheader("🛡️ 风控面板")
+    
+    col_left, col_right = st.columns(2)
+    
+    with col_left:
+        st.markdown("**Risk Agent 状态**")
+        try:
+            risk_path = os.path.join(DATA_DIR, "risk_state.json")
+            if os.path.exists(risk_path):
+                with open(risk_path) as f:
+                    rd = json.load(f)
+                cb = rd.get("circuit_breaker_active", False)
+                st.metric("熔断状态", "🛑 激活" if cb else "✅ 关闭")
+                st.metric("当日交易数", rd.get("daily_trades", 0))
+                st.metric("连续亏损", rd.get("consecutive_losses", 0))
+            else:
+                st.info("Risk Agent 尚未运行")
+        except Exception as e:
+            st.error(f"读取失败: {e}")
+        
+        st.markdown("---")
+        st.markdown("**测试 Risk Agent 审核**")
+        test_ticker = st.text_input("标的", "NVDA", key="risk_ticker")
+        test_price = st.number_input("价格", 100.0, key="risk_price")
+        test_shares = st.number_input("股数", 10, step=1, key="risk_shares")
+        
+        if st.button("🧪 测试审核", key="btn_risk_test"):
+            test_sig = TradingSignal(test_ticker, "BUY", int(test_shares), float(test_price))
+            ctx = PortfolioContext(cash=5000, portfolio_value=10000)
+            agent = RiskAgent(context=ctx)
+            r = agent.review(test_sig)
+            rd2 = result_to_dict(r)
+            st.markdown(f"**结果: {rd2['icon']} {rd2['verdict']}**")
+            st.write(f"通过股数: {rd2['approved_shares']}")
+            st.write(f"止损价: ${rd2['approved_stop']}")
+            st.write(f"止盈价: ${rd2['approved_target']}")
+            st.write(f"原因: {rd2['reason']}")
+    
+    with col_right:
+        st.markdown("**健康检查**")
+        if st.button("🩺 立即运行健康检查", key="btn_health"):
+            with st.spinner("运行中..."):
+                hc = HealthChecker()
+                report = hc.run_all()
+                st.text(report.summary())
+        else:
+            hc_path2 = os.path.join(DATA_DIR, "health_history.json")
+            if os.path.exists(hc_path2):
+                with open(hc_path2) as f:
+                    hist = json.load(f)
+                if hist:
+                    last = hist[-1]
+                    st.metric("上次检查通过", f"{last['passed']}/12")
+                    st.metric("警告", last['warn'])
+                    st.metric("失败", last['fail'])
+                    st.caption(f"检查时间: {last['timestamp'][:19]}")
+        
+        st.markdown("---")
+        st.markdown("**回测质量门**")
+        if st.button("📊 评估上次回测", key="btn_quality"):
+            with st.spinner("评估中..."):
+                gate = BacktestQualityGate()
+                report = gate.evaluate(None, {
+                    "data_years": 0.25,
+                    "has_survivorship_bias": False,
+                    "has_lookahead": False,
+                    "slippage_assumed": 0.002,
+                    "walk_forward_rounds": 5,
+                    "total_return_pct": 5.0,
+                    "sharpe_ratio": 0.8,
+                })
+                st.text(report.summary())
+
+# ====== TAB 7: 市场状态 ======
+with tab7:
+    st.subheader("📊 市场状态识别")
+    
+    if st.button("🔄 刷新市场状态", key="btn_regime"):
+        with st.spinner("分析中..."):
+            ra = RegimeAgent()
+            rs = ra.analyze(force_refresh=True)
+            d = rs.to_dict()
+            
+            regime_icons = {"TRENDING":"📈 趋势市","MEAN_REVERTING":"📊 震荡市","CRISIS":"🚨 危机","UNCERTAIN":"❓ 不确定"}
+            deg_names = ["正常", "谨慎", "防御", "安全"]
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("市场状态", regime_icons.get(d["regime"], "?"))
+            col2.metric("降级级别", f"L{d['degradation_level']} {deg_names[d['degradation_level']]}")
+            col3.metric("置信度", f"{d['confidence']:.0f}%")
+            
+            st.markdown("---")
+            st.markdown("**市场指标**")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("ADX 趋势强度", d["adx"])
+            m2.metric("VIX 恐慌指数", d["vix"])
+            m3.metric("年化波动率", f"{d['volatility']}%")
+            m4.metric("SPX 回撤", f"{d['spx_drawdown']}%")
+            
+            m5, m6, m7, m8 = st.columns(4)
+            m5.metric("5日收益", f"{d['spx_return_5d']}%")
+            m6.metric("20日收益", f"{d['spx_return_20d']}%")
+            m7.metric("相关性飙升", "⚠️ 是" if d['correlation_spike'] else "✅ 否")
+            m8.metric("描述", d['description'][:30])
+            
+            # 显示降级参数调整
+            adj = get_regime_adjustments(rs)
+            st.markdown("---")
+            st.markdown("**当前风险参数**")
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("单笔上限", f"{adj['max_position_pct']:.0%}")
+            p2.metric("止损", f"{adj['stop_loss_pct']:.0f}%")
+            p3.metric("止盈", f"{adj['take_profit_pct']:.0f}%")
+            p4.metric("风险倍数", f"{adj['risk_multiplier']:.1f}x")
+            
+            st.info(f"📝 {d['description']}")
+    else:
+        try:
+            ra = RegimeAgent()
+            rs = ra.analyze()
+            d = rs.to_dict()
+            st.info(f"上次分析: {d['description']}")
+            st.caption(f"点击「刷新市场状态」获取最新数据")
+        except:
+            st.info("点击「刷新市场状态」开始分析")
 
 st.markdown("---")
 st.caption("⚠️ 仅供参考，不构成投资建议 | 数据来源: yfinance | 信号通过 Telegram 推送")
