@@ -502,7 +502,30 @@ if __name__ == "__main__":
     sheets_ok = step4_sheets(approved_signals, ranked, dl_preds)
     backtest_score = step6_backtest()
     step5_telegram(approved_signals, ranked, dl_preds, backtest_score)
-
+    
+    # ── 健康检查（每周日自动运行） ─────────────────────────────
+    try:
+        from bot.health_check import HealthChecker
+        hc = HealthChecker()
+        if hc.history:
+            last_check = hc.history[-1].get("timestamp", "")
+            if last_check:
+                last_time = datetime.fromisoformat(last_check)
+                days_since = (datetime.now() - last_time).days
+        else:
+            days_since = 999  # 从未运行过
+        
+        HEALTH_INTERVAL_DAYS = 7
+        if days_since >= HEALTH_INTERVAL_DAYS:
+            log(f"━━━ 健康检查（距上次 {days_since} 天）━━━")
+            report = hc.run_all()
+            for line in report.summary().split("\n"):
+                log(f"  {line.strip()}")
+        else:
+            log(f"  ⏭️ 健康检查跳过（距上次检查 {days_since} 天，每{HEALTH_INTERVAL_DAYS}天一次）")
+    except Exception as he:
+        log(f"  [!] 健康检查失败: {he}")
+    
     log(f"")
     log(f"══════════════════════════════════════════════")
     log(f"[{datetime.now().strftime('%H:%M:%S')}] === Cron Dry-run 完成 ===")
